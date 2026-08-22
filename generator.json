@@ -1,4 +1,4 @@
 {
-  "build": "npm install --legacy-peer-deps",
-  "run": "node --import tsx src/generate.ts"
+  "build": "python3 -m compileall -q src",
+  "run": "python3 src/generate.py"
 }
