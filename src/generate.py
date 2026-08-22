@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -28,6 +29,129 @@ class ToolDef:
     tags: frozenset[str]
     deprecated: bool
     service: str | None
+
+
+@dataclass(frozen=True)
+class Candidate:
+    producer: str
+    consumer: str
+    label: str
+    output: FieldDef
+    score: float
+    reason: str
+
+
+def canonical_tokens(value: str) -> tuple[str, ...]:
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
+    tokens = re.findall(r"[A-Za-z0-9]+", value.lower())
+    normalized = []
+    aliases = {"identifier": "id", "identifiers": "id", "num": "number"}
+    for token in tokens:
+        token = aliases.get(token, token)
+        if token.endswith("ies") and len(token) > 3:
+            token = f"{token[:-3]}y"
+        elif token.endswith("s") and len(token) > 3 and not token.endswith(("ss", "us", "is")):
+            token = token[:-1]
+        normalized.append(token)
+    return tuple(normalized)
+
+
+_USER_CONTEXT_FIELDS = {
+    "body",
+    "content",
+    "description",
+    "message",
+    "name",
+    "org",
+    "owner",
+    "repo",
+    "title",
+}
+_WRAPPER_FIELDS = {"data", "error", "successful"}
+
+
+def _compatible_types(required: FieldDef, output: FieldDef) -> bool:
+    if "unknown" in (required.type, output.type) or required.type == output.type:
+        return True
+    return {required.type, output.type} <= {"integer", "number"}
+
+
+def _candidate_score(
+    required: FieldDef,
+    output: FieldDef,
+    producer: ToolDef,
+    consumer: ToolDef,
+) -> tuple[float, str] | None:
+    if output.name.lower() in _WRAPPER_FIELDS or not _compatible_types(required, output):
+        return None
+
+    required_tokens = canonical_tokens(required.name)
+    output_tokens = canonical_tokens(output.name)
+    context_tokens = set(
+        canonical_tokens(output.path)
+        + canonical_tokens(output.entity)
+        + canonical_tokens(producer.id)
+    )
+    if required_tokens == output_tokens:
+        score, reason = 0.98, "exact normalized field name"
+    elif output_tokens and set(required_tokens) <= context_tokens | set(output_tokens):
+        score, reason = 0.88, "output field plus entity/path context"
+    else:
+        return None
+
+    if producer.service and producer.service == consumer.service:
+        score = min(score + 0.01, 1.0)
+        reason += "; same service"
+    return score, reason
+
+
+def find_candidates(
+    tools: list[ToolDef], limit: int = 8
+) -> dict[tuple[str, str], list[Candidate]]:
+    if limit < 1:
+        raise ValueError("candidate limit must be positive")
+    output_index: dict[tuple[str, ...], list[tuple[ToolDef, FieldDef]]] = {}
+    for producer in tools:
+        if producer.deprecated:
+            continue
+        for output in producer.outputs:
+            tokens = canonical_tokens(output.name)
+            if not tokens or output.name.lower() in _WRAPPER_FIELDS:
+                continue
+            for key in {tokens, (tokens[-1],)}:
+                output_index.setdefault(key, []).append((producer, output))
+
+    groups: dict[tuple[str, str], list[Candidate]] = {}
+    for consumer in tools:
+        inputs = {field.name: field for field in consumer.inputs}
+        for label in sorted(consumer.required_inputs):
+            required_tokens = canonical_tokens(label)
+            if "_".join(required_tokens) in _USER_CONTEXT_FIELDS:
+                continue
+            required = inputs.get(label, FieldDef(label, label, "unknown", "", ""))
+            best_by_producer: dict[str, Candidate] = {}
+            possible_outputs = []
+            for key in {required_tokens, (required_tokens[-1],)} if required_tokens else set():
+                possible_outputs.extend(output_index.get(key, ()))
+            for producer, output in possible_outputs:
+                if producer.id == consumer.id:
+                    continue
+                if required_tokens in {
+                    canonical_tokens(producer_input) for producer_input in producer.required_inputs
+                }:
+                    continue
+                match = _candidate_score(required, output, producer, consumer)
+                if not match:
+                    continue
+                score, reason = match
+                candidate = Candidate(producer.id, consumer.id, label, output, score, reason)
+                previous = best_by_producer.get(producer.id)
+                if previous is None or candidate.score > previous.score:
+                    best_by_producer[producer.id] = candidate
+            ranked = sorted(best_by_producer.values(), key=lambda item: (-item.score, item.producer))
+            if ranked:
+                groups[(consumer.id, label)] = ranked[:limit]
+    return groups
 
 
 def load_catalog(path: Path) -> list[dict[str, Any]]:
@@ -186,7 +310,43 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     if len(args) < 2:
         raise ValueError("pass the toolkit catalog path as the final argument")
-    graph = build_graph(normalize_catalog(load_catalog(Path(args[-1]))))
+    tools = normalize_catalog(load_catalog(Path(args[-1])))
+    if "--inspect-candidates" in args:
+        option = args.index("--inspect-candidates")
+        if option + 1 >= len(args) - 1 or ":" not in args[option + 1]:
+            raise ValueError("--inspect-candidates requires CONSUMER_SLUG:FIELD")
+        consumer, label = args[option + 1].rsplit(":", 1)
+        selected = next((tool for tool in tools if tool.id == consumer), None)
+        if selected is None or label not in selected.required_inputs:
+            raise ValueError(f"unknown required input: {consumer}:{label}")
+        candidates = find_candidates(tools).get((consumer, label), [])
+        print(
+            json.dumps(
+                {
+                    "consumer": consumer,
+                    "label": label,
+                    "candidates": [
+                        {
+                            "producer": candidate.producer,
+                            "score": round(candidate.score, 3),
+                            "reason": candidate.reason,
+                            "output": {
+                                "name": candidate.output.name,
+                                "path": candidate.output.path,
+                                "type": candidate.output.type,
+                                "entity": candidate.output.entity,
+                                "description": candidate.output.description,
+                            },
+                        }
+                        for candidate in candidates
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0
+
+    graph = build_graph(tools)
     output = Path("dependency_graph.json")
     output.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
     print(

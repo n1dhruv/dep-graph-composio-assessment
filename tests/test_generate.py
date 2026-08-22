@@ -6,7 +6,16 @@ from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
 
-from src.generate import build_graph, load_catalog, main, normalize_catalog
+from src.generate import (
+    FieldDef,
+    ToolDef,
+    build_graph,
+    canonical_tokens,
+    find_candidates,
+    load_catalog,
+    main,
+    normalize_catalog,
+)
 from src.selfcheck import main as selfcheck
 
 
@@ -49,6 +58,23 @@ ISSUE_LIST_TOOL = {
     "tags": ["issues", "readOnlyHint"],
     "isDeprecated": False,
 }
+
+
+def field(name, *, path=None, entity="", description="", type="string"):
+    return FieldDef(name, path or name, type, description, entity)
+
+
+def tool(tool_id, *, required=(), inputs=(), outputs=(), deprecated=False, service="issues"):
+    return ToolDef(
+        id=tool_id,
+        description=tool_id.replace("_", " ").lower(),
+        inputs=tuple(inputs),
+        required_inputs=frozenset(required),
+        outputs=tuple(outputs),
+        tags=frozenset({service}),
+        deprecated=deprecated,
+        service=service,
+    )
 
 
 class CatalogTests(unittest.TestCase):
@@ -178,6 +204,171 @@ class CatalogTests(unittest.TestCase):
                 selfcheck(catalog, root / "dependency_graph.json")
 
             self.assertEqual(json.loads(stdout.getvalue())["provenance_ratio"], 1.0)
+
+
+class CandidateTests(unittest.TestCase):
+    def test_canonical_tokens_normalize_case_separators_and_simple_plurals(self):
+        self.assertEqual(canonical_tokens("migrationId"), ("migration", "id"))
+        self.assertEqual(canonical_tokens("migration_id"), ("migration", "id"))
+        self.assertEqual(canonical_tokens("Issues"), ("issue",))
+
+    def test_exact_identifier_match_ranks_above_bare_id(self):
+        exact = tool(
+            "EXAMPLE_LIST_COMMENTS",
+            outputs=[field("comment_id", path="data.comments[].comment_id", entity="Comment")],
+        )
+        bare = tool(
+            "EXAMPLE_GET_COMMENT",
+            outputs=[field("id", path="data.comment.id", entity="Comment")],
+        )
+        consumer = tool(
+            "EXAMPLE_UPDATE_COMMENT",
+            required=["comment_id"],
+            inputs=[field("comment_id", description="The comment identifier.")],
+        )
+
+        candidates = find_candidates([bare, consumer, exact])[(consumer.id, "comment_id")]
+
+        self.assertEqual(candidates[0].producer, exact.id)
+        self.assertGreater(candidates[0].score, candidates[1].score)
+
+    def test_entity_context_distinguishes_issue_and_pull_numbers(self):
+        issue_producer = tool(
+            "EXAMPLE_LIST_ISSUES",
+            outputs=[field("number", path="data.issues[].number", entity="Issue")],
+        )
+        pull_producer = tool(
+            "EXAMPLE_LIST_PULL_REQUESTS",
+            outputs=[field("number", path="data.pull_requests[].number", entity="PullRequest")],
+            service="pull-requests",
+        )
+        issue_consumer = tool(
+            "EXAMPLE_COMMENT_ON_ISSUE",
+            required=["issue_number"],
+            inputs=[field("issue_number", description="The issue number.")],
+        )
+        pull_consumer = tool(
+            "EXAMPLE_MERGE_PULL_REQUEST",
+            required=["pull_number"],
+            inputs=[field("pull_number", description="The pull request number.")],
+            service="pull-requests",
+        )
+
+        groups = find_candidates([issue_producer, pull_producer, issue_consumer, pull_consumer])
+
+        self.assertEqual(
+            [candidate.producer for candidate in groups[(issue_consumer.id, "issue_number")]],
+            [issue_producer.id],
+        )
+        self.assertEqual(
+            [candidate.producer for candidate in groups[(pull_consumer.id, "pull_number")]],
+            [pull_producer.id],
+        )
+
+    def test_user_context_fields_do_not_create_candidates(self):
+        generic = ("owner", "repo", "org", "body", "title", "name", "description", "message", "content")
+        producer = tool("EXAMPLE_GENERIC_OUTPUT", outputs=[field(name) for name in generic])
+        consumer = tool(
+            "EXAMPLE_GENERIC_INPUT",
+            required=generic,
+            inputs=[field(name) for name in generic],
+        )
+
+        self.assertEqual(find_candidates([producer, consumer]), {})
+
+    def test_self_edges_and_deprecated_producers_are_excluded(self):
+        self_matching = tool(
+            "EXAMPLE_SELF_MATCH",
+            required=["issue_number"],
+            inputs=[field("issue_number")],
+            outputs=[field("issue_number", entity="Issue")],
+        )
+        deprecated = tool(
+            "EXAMPLE_OLD_ISSUES",
+            outputs=[field("issue_number", entity="Issue")],
+            deprecated=True,
+        )
+
+        self.assertEqual(find_candidates([self_matching, deprecated]), {})
+
+    def test_producer_cannot_require_the_value_it_claims_to_produce(self):
+        source = tool(
+            "EXAMPLE_LIST_ISSUES",
+            outputs=[field("number", path="data.issues[].number", entity="Issue")],
+        )
+        circular = tool(
+            "EXAMPLE_CLOSE_ISSUE",
+            required=["issue_number"],
+            inputs=[field("issue_number")],
+            outputs=[field("number", path="data.issue.number", entity="Issue")],
+        )
+        consumer = tool(
+            "EXAMPLE_COMMENT_ON_ISSUE",
+            required=["issue_number"],
+            inputs=[field("issue_number")],
+        )
+
+        candidates = find_candidates([source, circular, consumer])[(consumer.id, "issue_number")]
+
+        self.assertEqual([candidate.producer for candidate in candidates], [source.id])
+
+    def test_candidate_shortlists_are_capped(self):
+        producers = [
+            tool(
+                f"EXAMPLE_PRODUCER_{index}",
+                outputs=[field("comment_id", entity="Comment")],
+            )
+            for index in range(10)
+        ]
+        consumer = tool(
+            "EXAMPLE_CONSUMER",
+            required=["comment_id"],
+            inputs=[field("comment_id")],
+        )
+
+        candidates = find_candidates([*producers, consumer])[(consumer.id, "comment_id")]
+
+        self.assertEqual(len(candidates), 8)
+
+    def test_inspect_candidates_prints_a_compact_shortlist(self):
+        consumer = {
+            "slug": "EXAMPLE_COMMENT_ON_ISSUE",
+            "description": "Comments on an issue.",
+            "inputParameters": {
+                "type": "object",
+                "properties": {
+                    "issue_number": {
+                        "type": "integer",
+                        "description": "The issue number.",
+                    }
+                },
+                "required": ["issue_number"],
+            },
+            "outputParameters": {"type": "object", "properties": {}},
+            "tags": ["issues"],
+            "isDeprecated": False,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            catalog = Path(directory) / "catalog.json"
+            catalog.write_text(json.dumps([ISSUE_LIST_TOOL, consumer]), encoding="utf-8")
+            stdout = StringIO()
+
+            with redirect_stdout(stdout):
+                status = main(
+                    [
+                        "generate.py",
+                        "--inspect-candidates",
+                        "EXAMPLE_COMMENT_ON_ISSUE:issue_number",
+                        str(catalog),
+                    ]
+                )
+
+        report = json.loads(stdout.getvalue())
+        self.assertEqual(status, 0)
+        self.assertEqual((report["consumer"], report["label"]), (consumer["slug"], "issue_number"))
+        self.assertEqual(report["candidates"][0]["producer"], ISSUE_LIST_TOOL["slug"])
+        self.assertEqual(report["candidates"][0]["output"]["path"], "data.issues[].number")
+        self.assertEqual(report["candidates"][0]["output"]["entity"], "Issue")
 
 
 if __name__ == "__main__":

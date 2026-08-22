@@ -123,7 +123,7 @@
 
 ---
 
-## Phase 2A: Deterministic edge candidate retrieval
+## Phase 2A: Deterministic edge candidate retrieval — complete
 
 **Files:**
 
@@ -133,11 +133,11 @@
 **Interfaces:**
 
 - Consumes `ToolDef` and `FieldDef` from Phase 1.
-- Produces `Candidate(producer: str, consumer: str, label: str, score: float, reason: str)`.
+- Produces `Candidate(producer: str, consumer: str, label: str, output: FieldDef, score: float, reason: str)` so Phase 2B receives the exact schema evidence behind each shortlist entry.
 - Produces `canonical_tokens(value: str) -> tuple[str, ...]`, normalizing camelCase, snake_case, case, and singular/plural variants.
 - Produces `find_candidates(tools: list[ToolDef], limit: int = 8) -> dict[tuple[str, str], list[Candidate]]` keyed by `(consumer_slug, required_input_name)`.
 
-- [ ] **Step 1: Write candidate-retrieval tests**
+- [x] **Step 1: Write candidate-retrieval tests**
 
   Use synthetic issue and pull-request tools to prove:
 
@@ -148,13 +148,13 @@
   - self-edges and deprecated producers are excluded;
   - no shortlist exceeds eight producers.
 
-- [ ] **Step 2: Run the tests and confirm retrieval is absent**
+- [x] **Step 2: Run the tests and confirm retrieval is absent**
 
   Run: `python3 -m unittest tests.test_generate.CandidateTests -v`
 
   Expected: FAIL because `canonical_tokens` and `find_candidates` do not exist.
 
-- [ ] **Step 3: Implement canonicalization and scoring**
+- [x] **Step 3: Implement canonicalization and scoring**
 
   Split camelCase and punctuation into lowercase tokens, normalize simple plurals, and compare the required input with the output leaf, schema path, entity name, output description, and producer name. Use these deterministic signals:
 
@@ -166,7 +166,7 @@
 
   Deterministic scores retrieve candidates but do not yet authorize final ambiguous edges.
 
-- [ ] **Step 4: Audit compact shortlists against the real catalog**
+- [x] **Step 4: Audit compact shortlists against the real catalog**
 
   Add a diagnostic CLI option `--inspect-candidates CONSUMER_SLUG:FIELD` that prints only the selected consumer input and its compact shortlist. Inspect at least:
 
@@ -178,7 +178,7 @@
 
   Confirm that issue and pull-request candidates remain entity-specific and that generic repository context is absent.
 
-- [ ] **Step 5: Run Phase 2A verification and commit**
+- [x] **Step 5: Run Phase 2A verification and commit**
 
   Run: `python3 -m unittest tests.test_generate.CandidateTests -v`
 
@@ -188,6 +188,8 @@
   git add src/generate.py tests/test_generate.py
   git commit -m "feat: edge candidate matcher"
   ```
+
+**Recorded outcome:** The GitHub catalog produced 777 non-empty consumer-input groups and 5,052 candidates, with no shortlist exceeding eight. The audits included `GITHUB_LIST_REPOSITORY_ISSUES`, `GITHUB_LIST_PULL_REQUESTS`, and `GITHUB_LIST_REPO_INVITATIONS_FOR_AUTH_USER` for the three planned examples; circular tools that already require the target value were excluded.
 
 ---
 
