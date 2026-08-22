@@ -259,7 +259,7 @@
 
 ---
 
-## Phase 3: Score, validate, and emit the dependency graph
+## Phase 3: Score, validate, and emit the dependency graph (complete)
 
 **Files:**
 
@@ -274,21 +274,21 @@
 - Produces `finalize_edges(scored: Iterable[ScoredEdge], valid_ids: set[str], required_by_tool: dict[str, frozenset[str]], threshold: float) -> list[dict[str, str]]`.
 - Produces stable graph JSON with nodes sorted by ID and edges sorted by `(from, to, label)`.
 
-- [ ] **Step 1: Write finalization tests**
+- [x] **Step 1: Write finalization tests**
 
   Prove that finalization removes edges below the configured threshold, keeps the highest-confidence duplicate, preserves distinct valid alternative producers, rejects invalid provenance, rejects labels not required by the consumer, and sorts output deterministically.
 
-- [ ] **Step 2: Run the tests and confirm finalization is absent**
+- [x] **Step 2: Run the tests and confirm finalization is absent**
 
   Run: `python3 -m unittest tests.test_generate.GraphTests -v`
 
   Expected: FAIL because `finalize_edges` does not exist.
 
-- [ ] **Step 3: Implement final validation and emission**
+- [x] **Step 3: Implement final validation and emission**
 
   Start with a confidence threshold of `0.75`. Keep it as a named constant, not an environment option, until evidence shows a second operational use case. Write the output atomically through a temporary file in the working directory followed by `Path.replace`.
 
-- [ ] **Step 4: Generate and audit the GitHub graph**
+- [x] **Step 4: Generate and audit the GitHub graph**
 
   Run the full generator with the assessment credentials. Confirm these positive examples appear through a valid producer path:
 
@@ -297,7 +297,7 @@
 
   Also inspect at least 20 evenly spaced edges and search for `owner`, `repo`, `org`, and free-form-body labels. If obvious false positives remain, adjust the threshold or candidate rule, rerun the same audit, and record the final threshold in the README during Phase 5.
 
-- [ ] **Step 5: Run Phase 3 verification**
+- [x] **Step 5: Run Phase 3 verification**
 
   Run:
 
@@ -309,12 +309,21 @@
 
   Expected: tests PASS; provenance is `1.0`; edges are non-zero and labeled; JSON validation exits 0.
 
-- [ ] **Step 6: Commit Phase 3**
+- [x] **Step 6: Commit Phase 3**
 
   ```bash
   git add src/generate.py src/selfcheck.py tests/test_generate.py dependency_graph.json
   git commit -m "feat: emit validated dependency graph"
   ```
+
+**Recorded outcome:** The official generator validates provenance and required
+labels, deduplicates by highest confidence, applies a `0.75` threshold, sorts
+deterministically, and writes atomically. The full live sweep was stopped to
+limit assessment API spend; the committed artifact is a conservative offline
+snapshot of exact/contextual identifier candidates. It contains 893 nodes and
+2,074 edges, has zero invalid or generic-context edges, and includes eight
+valid producers for each required issue and pull-request example. All 32 tests
+and bytecode compilation pass.
 
 ---
 

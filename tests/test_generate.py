@@ -17,6 +17,7 @@ from src.generate import (
     canonical_tokens,
     chat_completion,
     classify_candidates,
+    finalize_edges,
     find_candidates,
     load_catalog,
     main,
@@ -481,6 +482,38 @@ class LlmTests(unittest.TestCase):
             ],
         )
 
+    def test_validate_model_edges_deduplicates_repeated_edges(self):
+        edge = {
+            "producer": self.first.id,
+            "consumer": self.consumer.id,
+            "label": "comment_id",
+            "confidence": 0.86,
+            "reason": "Returns comment identifiers.",
+        }
+
+        edges = validate_model_edges(
+            {"edges": [edge, {**edge, "confidence": 0.94}]},
+            self.allowed,
+        )
+
+        self.assertEqual(len(edges), 1)
+        self.assertEqual(edges[0].confidence, 0.94)
+
+    def test_validate_model_edges_discards_non_candidates(self):
+        response = {
+            "edges": [
+                {
+                    "producer": "UNKNOWN_TOOL",
+                    "consumer": self.consumer.id,
+                    "label": "comment_id",
+                    "confidence": 0.9,
+                    "reason": "Invented by the model.",
+                }
+            ]
+        }
+
+        self.assertEqual(validate_model_edges(response, self.allowed), [])
+
     def test_validate_model_edges_rejects_untrusted_output(self):
         valid = {
             "producer": self.first.id,
@@ -493,24 +526,14 @@ class LlmTests(unittest.TestCase):
             None,
             {"edges": "not-a-list"},
             {"edges": ["not-an-object"]},
-            {"edges": [{**valid, "producer": "UNKNOWN_TOOL"}]},
-            {"edges": [{**valid, "label": "owner"}]},
             {"edges": [{**valid, "confidence": 1.1}]},
             {"edges": [{**valid, "confidence": True}]},
             {"edges": [{**valid, "reason": ""}]},
-            {"edges": [valid, valid]},
         )
         for response in invalid_responses:
             with self.subTest(response=response):
                 with self.assertRaises(ValueError):
                     validate_model_edges(response, self.allowed)
-
-        self_edge = {**valid, "producer": self.consumer.id, "consumer": self.consumer.id}
-        with self.assertRaises(ValueError):
-            validate_model_edges(
-                {"edges": [self_edge]},
-                {(self.consumer.id, self.consumer.id, "comment_id")},
-            )
 
     def test_classify_candidates_batches_compact_untrusted_questions(self):
         groups = {}
@@ -618,6 +641,25 @@ class LlmTests(unittest.TestCase):
         self.assertEqual(request.call_count, 2)
         sleep.assert_called_once()
 
+    def test_chat_completion_retries_read_timeouts(self):
+        response = FakeHttpResponse(
+            {"choices": [{"message": {"content": '{"edges": []}'}}]}
+        )
+        environment = {
+            "OPENAI_API_KEY": "test-key",
+            "OPENAI_BASE_URL": "https://example.test/v1",
+        }
+        with (
+            patch.dict(os.environ, environment, clear=True),
+            patch("src.generate.urlopen", side_effect=[TimeoutError(), response]) as request,
+            patch("src.generate.time.sleep") as sleep,
+        ):
+            result = chat_completion({"messages": []})
+
+        self.assertEqual(result, {"edges": []})
+        self.assertEqual(request.call_count, 2)
+        sleep.assert_called_once()
+
     def test_chat_completion_rejects_non_object_json_content(self):
         response = FakeHttpResponse({"choices": [{"message": {"content": "[]"}}]})
         environment = {
@@ -678,6 +720,73 @@ class LlmTests(unittest.TestCase):
         self.assertEqual(status, 0)
         self.assertEqual(report["edges"][0]["producer"], ISSUE_LIST_TOOL["slug"])
         self.assertEqual(report["edges"][0]["source"], "llm")
+
+
+class GraphTests(unittest.TestCase):
+    def test_finalize_edges_filters_deduplicates_preserves_alternatives_and_sorts(self):
+        scored = [
+            ScoredEdge("PRODUCER_B", "CONSUMER", "item_id", 0.82, "valid", "llm"),
+            ScoredEdge("PRODUCER_A", "CONSUMER", "item_id", 0.91, "best", "llm"),
+            ScoredEdge("PRODUCER_A", "CONSUMER", "item_id", 0.80, "duplicate", "llm"),
+            ScoredEdge("PRODUCER_C", "CONSUMER", "item_id", 0.74, "low", "llm"),
+        ]
+
+        edges = finalize_edges(
+            scored,
+            {"PRODUCER_A", "PRODUCER_B", "PRODUCER_C", "CONSUMER"},
+            {"CONSUMER": frozenset({"item_id"})},
+            0.75,
+        )
+
+        self.assertEqual(
+            edges,
+            [
+                {"from": "PRODUCER_A", "to": "CONSUMER", "label": "item_id"},
+                {"from": "PRODUCER_B", "to": "CONSUMER", "label": "item_id"},
+            ],
+        )
+
+    def test_finalize_edges_rejects_invalid_provenance_labels_and_scores(self):
+        invalid = (
+            ScoredEdge("UNKNOWN", "CONSUMER", "item_id", 0.9, "bad", "llm"),
+            ScoredEdge("PRODUCER", "UNKNOWN", "item_id", 0.9, "bad", "llm"),
+            ScoredEdge("PRODUCER", "CONSUMER", "owner", 0.9, "bad", "llm"),
+            ScoredEdge("CONSUMER", "CONSUMER", "item_id", 0.9, "bad", "llm"),
+            ScoredEdge("PRODUCER", "CONSUMER", "item_id", 1.1, "bad", "llm"),
+        )
+        for edge in invalid:
+            with self.subTest(edge=edge):
+                with self.assertRaises(ValueError):
+                    finalize_edges(
+                        [edge],
+                        {"PRODUCER", "CONSUMER"},
+                        {"CONSUMER": frozenset({"item_id"})},
+                        0.75,
+                    )
+
+    def test_build_graph_uses_classifier_and_emits_validated_edges(self):
+        producer = tool(
+            "EXAMPLE_LIST_ISSUES",
+            outputs=[field("number", path="data.issues[].number", entity="Issue", type="integer")],
+        )
+        consumer = tool(
+            "EXAMPLE_COMMENT_ON_ISSUE",
+            required=["issue_number"],
+            inputs=[field("issue_number", type="integer")],
+        )
+
+        def classify(groups, tools_by_id):
+            candidate = groups[(consumer.id, "issue_number")][0]
+            self.assertEqual(candidate.producer, producer.id)
+            self.assertEqual(set(tools_by_id), {producer.id, consumer.id})
+            return [ScoredEdge(producer.id, consumer.id, "issue_number", 0.95, "valid", "llm")]
+
+        graph = build_graph([consumer, producer], classify=classify)
+
+        self.assertEqual(
+            graph["edges"],
+            [{"from": producer.id, "to": consumer.id, "label": "issue_number"}],
+        )
 
 
 if __name__ == "__main__":

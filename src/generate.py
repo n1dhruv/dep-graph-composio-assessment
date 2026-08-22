@@ -9,7 +9,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Sequence
+from typing import Any, Callable, Iterable, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -90,6 +90,11 @@ def chat_completion(payload: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeError(f"LLM API request failed with HTTP {error.code}") from error
         except URLError as error:
             raise RuntimeError(f"LLM API request failed: {error.reason}") from error
+        except TimeoutError as error:
+            if attempt < 2:
+                time.sleep(2**attempt)
+                continue
+            raise RuntimeError("LLM API request timed out after retries") from error
         except (KeyError, IndexError, TypeError, json.JSONDecodeError) as error:
             raise RuntimeError("LLM API returned malformed JSON content") from error
     raise RuntimeError("LLM API request failed after retries")
@@ -101,8 +106,7 @@ def validate_model_edges(
 ) -> list[ScoredEdge]:
     if not isinstance(response, dict) or not isinstance(response.get("edges"), list):
         raise ValueError("model response must be an object with an edges array")
-    edges: list[ScoredEdge] = []
-    seen: set[tuple[str, str, str]] = set()
+    edges: dict[tuple[str, str, str], ScoredEdge] = {}
     for raw in response["edges"]:
         if not isinstance(raw, dict):
             raise ValueError("every model edge must be an object")
@@ -115,18 +119,17 @@ def validate_model_edges(
         if not all(isinstance(value, str) and value for value in key):
             raise ValueError("model edge endpoints and label must be non-empty strings")
         if key not in allowed or producer == consumer:
-            raise ValueError(f"model returned a non-candidate edge: {key}")
+            continue
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)):
             raise ValueError("model edge confidence must be numeric")
         if not 0 <= confidence <= 1:
             raise ValueError("model edge confidence must be between 0 and 1")
         if not isinstance(reason, str) or not reason.strip():
             raise ValueError("model edge reason must be a non-empty string")
-        if key in seen:
-            raise ValueError(f"model returned a duplicate edge: {key}")
-        seen.add(key)
-        edges.append(ScoredEdge(*key, float(confidence), reason.strip(), "llm"))
-    return edges
+        edge = ScoredEdge(*key, float(confidence), reason.strip(), "llm")
+        if key not in edges or edge.confidence > edges[key].confidence:
+            edges[key] = edge
+    return list(edges.values())
 
 
 _SYSTEM_PROMPT = """You identify data dependencies between catalog tools.
@@ -246,6 +249,36 @@ def classify_candidates(
     return sorted(scored, key=lambda edge: (edge.consumer, edge.label, edge.producer))
 
 
+def finalize_edges(
+    scored: Iterable[ScoredEdge],
+    valid_ids: set[str],
+    required_by_tool: dict[str, frozenset[str]],
+    threshold: float,
+) -> list[dict[str, str]]:
+    if not 0 <= threshold <= 1:
+        raise ValueError("edge confidence threshold must be between 0 and 1")
+    accepted: dict[tuple[str, str, str], ScoredEdge] = {}
+    for edge in scored:
+        if edge.producer not in valid_ids or edge.consumer not in valid_ids:
+            raise ValueError("edge endpoint is not a catalog tool")
+        if edge.producer == edge.consumer:
+            raise ValueError("self-edges are not valid dependencies")
+        if edge.label not in required_by_tool.get(edge.consumer, frozenset()):
+            raise ValueError("edge label is not a required consumer input")
+        if not 0 <= edge.confidence <= 1:
+            raise ValueError("edge confidence must be between 0 and 1")
+        if edge.confidence < threshold:
+            continue
+        key = (edge.producer, edge.consumer, edge.label)
+        previous = accepted.get(key)
+        if previous is None or edge.confidence > previous.confidence:
+            accepted[key] = edge
+    return [
+        {"from": producer, "to": consumer, "label": label}
+        for producer, consumer, label in sorted(accepted)
+    ]
+
+
 def canonical_tokens(value: str) -> tuple[str, ...]:
     value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", value)
     tokens = re.findall(r"[A-Za-z0-9]+", value.lower())
@@ -273,6 +306,7 @@ _USER_CONTEXT_FIELDS = {
     "title",
 }
 _WRAPPER_FIELDS = {"data", "error", "successful"}
+EDGE_CONFIDENCE_THRESHOLD = 0.75
 
 
 def _compatible_types(required: FieldDef, output: FieldDef) -> bool:
@@ -508,7 +542,17 @@ def build_graph(
         if tool.service:
             node["service"] = tool.service
         nodes.append(node)
-    return {"nodes": nodes, "edges": []}
+    scored = (classify or classify_candidates)(
+        find_candidates(tools),
+        {tool.id: tool for tool in tools},
+    )
+    edges = finalize_edges(
+        scored,
+        {tool.id for tool in tools},
+        {tool.id: tool.required_inputs for tool in tools},
+        EDGE_CONFIDENCE_THRESHOLD,
+    )
+    return {"nodes": nodes, "edges": edges}
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -589,7 +633,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     graph = build_graph(tools)
     output = Path("dependency_graph.json")
-    output.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+    temporary = output.with_suffix(f"{output.suffix}.tmp")
+    temporary.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
+    temporary.replace(output)
     print(
         f"wrote {len(graph['nodes'])} nodes, {len(graph['edges'])} edges to {output}",
         file=sys.stderr,
