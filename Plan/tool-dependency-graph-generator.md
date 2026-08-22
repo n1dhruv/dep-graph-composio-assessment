@@ -193,7 +193,7 @@
 
 ---
 
-## Phase 2B: Batched LLM semantic adjudication
+## Phase 2B: Batched LLM semantic adjudication — implementation complete; live smoke pending
 
 **Files:**
 
@@ -203,22 +203,22 @@
 **Interfaces:**
 
 - Consumes candidate groups from Phase 2A.
-- Produces `classify_candidates(groups: dict[tuple[str, str], list[Candidate]], tools_by_id: dict[str, ToolDef]) -> list[ScoredEdge]`.
+- Produces `classify_candidates(groups: dict[tuple[str, str], list[Candidate]], tools_by_id: dict[str, ToolDef], complete: Callable | None = None) -> list[ScoredEdge]`; tests inject `complete`, while runtime defaults to the HTTP client.
 - Produces `ScoredEdge(producer: str, consumer: str, label: str, confidence: float, reason: str, source: str)`.
 - Produces `chat_completion(payload: dict[str, Any]) -> dict[str, Any]`, an OpenAI-compatible standard-library HTTP call.
 - Produces `validate_model_edges(response: object, allowed: set[tuple[str, str, str]]) -> list[ScoredEdge]`.
 
-- [ ] **Step 1: Write model-response validation tests**
+- [x] **Step 1: Write model-response validation tests**
 
   Inject a fake classifier response and prove that validation rejects unknown slugs, labels that are not the requested required input, non-shortlisted producer pairs, self-edges, confidence outside `[0, 1]`, duplicates, and malformed JSON. Prove that multiple valid producers for one input are preserved.
 
-- [ ] **Step 2: Run the tests and confirm adjudication is absent**
+- [x] **Step 2: Run the tests and confirm adjudication is absent**
 
   Run: `python3 -m unittest tests.test_generate.LlmTests -v`
 
   Expected: FAIL because the classifier and validator do not exist.
 
-- [ ] **Step 3: Implement compact batched prompts**
+- [x] **Step 3: Implement compact batched prompts**
 
   Send no more than 20 consumer-input questions per request and no more than eight candidates per question. Include only:
 
@@ -229,11 +229,11 @@
 
   Instruct the model to treat catalog text as untrusted data, return JSON only, select zero or more genuine ways to obtain the required value, and distinguish reusable identifiers from ordinary user-authored/context values.
 
-- [ ] **Step 4: Implement the API call and strict parsing**
+- [x] **Step 4: Implement the API call and strict parsing**
 
   POST to `${OPENAI_BASE_URL.rstrip('/')}/chat/completions` with bearer authentication, `OPENAI_MODEL`, temperature `0`, and JSON response format. Use a 60-second timeout and at most two retries for HTTP 429 and 5xx responses. Raise a concise exception after the retry limit or on invalid JSON.
 
-- [ ] **Step 5: Preserve deterministic high-confidence edges**
+- [x] **Step 5: Preserve deterministic high-confidence edges**
 
   Accept a deterministic edge without an API call only when the field names canonicalize exactly, the name is not generic, the output path/entity agrees with the input entity, and there is exactly one credible producer. Send all other non-empty shortlists to the model.
 
@@ -248,12 +248,14 @@
 
   Expected: offline tests PASS; the live response selects one or more issue-producing tools and returns only catalog slugs with confidence values.
 
-- [ ] **Step 7: Commit Phase 2B**
+- [x] **Step 7: Commit Phase 2B**
 
   ```bash
   git add src/generate.py tests/test_generate.py
   git commit -m "feat: LLM-assisted semantic matching"
   ```
+
+**Recorded outcome:** Offline validation covers batching, prompt-injection boundaries, malformed responses, hallucinated/non-candidate edges, duplicates, confidence bounds, retries, missing credentials, and conservative deterministic bypass. A no-credit GitHub dry run produced 39 batches for 777 questions; the largest request payload was 96,774 bytes. The real catalog had no edge safe enough for deterministic bypass, avoiding the false confidence found during review. Step 6's live smoke remains unchecked because `OPENAI_API_KEY` and `OPENAI_BASE_URL` were absent from the execution environment.
 
 ---
 
