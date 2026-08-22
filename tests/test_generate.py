@@ -2,7 +2,7 @@ import json
 import os
 import tempfile
 import unittest
-from contextlib import redirect_stdout
+from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
@@ -23,8 +23,9 @@ from src.generate import (
     main,
     normalize_catalog,
     validate_model_edges,
+    write_visualization,
 )
-from src.selfcheck import main as selfcheck
+from src.selfcheck import check, main as selfcheck
 
 
 ISSUE_LIST_TOOL = {
@@ -188,39 +189,34 @@ class CatalogTests(unittest.TestCase):
             self.assertEqual(status, 0)
             self.assertEqual(graph["nodes"], [{"id": "EXAMPLE_LIST_ISSUES", "service": "issues"}])
             self.assertEqual(graph["edges"], [])
+            self.assertTrue((root / "dependency_graph.html").is_file())
 
-    def test_selfcheck_runs_generator_and_reports_baseline_metrics(self):
+    def test_selfcheck_reports_missing_generated_artifacts(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             catalog = root / "catalog.json"
             output = root / "dependency_graph.json"
             catalog.write_text(json.dumps([ISSUE_LIST_TOOL]), encoding="utf-8")
 
-            stdout = StringIO()
-            with redirect_stdout(stdout):
+            with redirect_stderr(StringIO()) as stderr:
                 status = selfcheck(catalog, output)
 
-            self.assertEqual(status, 0)
-            self.assertTrue(output.exists())
-            self.assertEqual(
-                json.loads(stdout.getvalue()),
-                {"nodes": 1, "edges": 0, "provenance_ratio": 1.0, "labeled_edges": 0},
-            )
+            self.assertEqual(status, 1)
+            self.assertIn("cannot load inputs", stderr.getvalue())
 
-    def test_selfcheck_uses_the_same_fallback_ids_as_the_generator(self):
-        fallback = json.loads(json.dumps(ISSUE_LIST_TOOL))
-        fallback.pop("slug")
-        fallback["function"] = {"name": "EXAMPLE_FUNCTION_TOOL"}
+    def test_check_rejects_invalid_edges_and_missing_visualization(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             catalog = root / "catalog.json"
-            catalog.write_text(json.dumps([fallback]), encoding="utf-8")
+            graph = root / "dependency_graph.json"
+            catalog.write_text(json.dumps([ISSUE_LIST_TOOL]), encoding="utf-8")
+            graph.write_text(json.dumps({"nodes": [{"id": "UNKNOWN"}], "edges": []}), encoding="utf-8")
 
-            stdout = StringIO()
-            with redirect_stdout(stdout):
-                selfcheck(catalog, root / "dependency_graph.json")
+            failures = check(catalog, graph, root / "dependency_graph.html")
 
-            self.assertEqual(json.loads(stdout.getvalue())["provenance_ratio"], 1.0)
+            self.assertIn("node provenance is below 0.8", failures)
+            self.assertIn("graph must contain at least one edge", failures)
+            self.assertIn("dependency_graph.html is missing", failures)
 
 
 class CandidateTests(unittest.TestCase):
@@ -787,6 +783,24 @@ class GraphTests(unittest.TestCase):
             graph["edges"],
             [{"from": producer.id, "to": consumer.id, "label": "issue_number"}],
         )
+
+
+class VisualizationTests(unittest.TestCase):
+    def test_write_visualization_embeds_graph_without_fetching_json(self):
+        graph = {
+            "nodes": [{"id": "PRODUCER"}, {"id": "CONSUMER"}],
+            "edges": [{"from": "PRODUCER", "to": "CONSUMER", "label": "item_id"}],
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dependency_graph.html"
+            write_visualization(graph, output)
+            document = output.read_text(encoding="utf-8")
+
+        self.assertIn("PRODUCER", document)
+        self.assertIn("CONSUMER", document)
+        self.assertIn("item_id", document)
+        self.assertIn('id="graph-data"', document)
+        self.assertNotIn('fetch("dependency_graph.json")', document)
 
 
 if __name__ == "__main__":

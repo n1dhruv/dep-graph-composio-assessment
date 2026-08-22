@@ -327,7 +327,7 @@ and bytecode compilation pass.
 
 ---
 
-## Phase 4: Static interactive visualization
+## Phase 4: Static interactive visualization (complete)
 
 **Files:**
 
@@ -341,27 +341,27 @@ and bytecode compilation pass.
 - Produces `write_visualization(graph: dict[str, Any], path: Path) -> None`.
 - Produces a self-contained HTML file with graph data embedded as JSON; it must not fetch `dependency_graph.json` through `file://`.
 
-- [ ] **Step 1: Write visualization tests**
+- [x] **Step 1: Write visualization tests**
 
   Generate HTML from a two-node, one-edge graph and assert that both node IDs, the edge label, and embedded JSON appear. Assert that the document does not contain `fetch("dependency_graph.json")`.
 
-- [ ] **Step 2: Run the test and confirm visualization is absent**
+- [x] **Step 2: Run the test and confirm visualization is absent**
 
   Run: `python3 -m unittest tests.test_generate.VisualizationTests -v`
 
   Expected: FAIL because `write_visualization` does not exist.
 
-- [ ] **Step 3: Implement the smallest useful viewer**
+- [x] **Step 3: Implement the smallest useful viewer**
 
   Embed graph data directly into one HTML file. Use a CDN-hosted graph renderer only for layout/rendering, show node IDs and directed labeled edges, and add search plus basic zoom/pan. Display a clear message if the CDN cannot load; do not add a frontend build system.
 
-- [ ] **Step 4: Generate and inspect the committed artifact**
+- [x] **Step 4: Generate and inspect the committed artifact**
 
   Run: `python3 src/generate.py github_catalog.json`
 
   Open `dependency_graph.html`, search for the two README consumer examples, and confirm their incoming edges and labels are visible.
 
-- [ ] **Step 5: Run Phase 4 verification and commit**
+- [x] **Step 5: Run Phase 4 verification and commit**
 
   Run: `python3 -m unittest tests.test_generate.VisualizationTests -v`
 
@@ -374,7 +374,7 @@ and bytecode compilation pass.
 
 ---
 
-## Phase 5: Documentation, complete self-check, and submission readiness
+## Phase 5: Documentation, complete self-check, and submission readiness (complete)
 
 **Files:**
 
@@ -390,21 +390,21 @@ and bytecode compilation pass.
 - Documents the final parser, candidate retrieval, LLM adjudication, confidence threshold, known limitations, and non-GitHub assumptions.
 - Self-check exits non-zero for invalid graph shape, provenance below `0.8`, zero edges, unknown edge endpoints, labels absent from consumer required inputs, or missing visualization.
 
-- [ ] **Step 1: Add self-check failure tests**
+- [x] **Step 1: Add self-check failure tests**
 
   Use temporary files to prove each invalid condition produces a non-zero status and a concise diagnostic. Keep the self-check callable as `check(catalog_path: Path, graph_path: Path, html_path: Path) -> list[str]` so tests do not spawn subprocesses.
 
-- [ ] **Step 2: Run tests and confirm stricter checks are absent**
+- [x] **Step 2: Run tests and confirm stricter checks are absent**
 
   Run: `python3 -m unittest tests.test_generate.SelfCheckTests -v`
 
   Expected: FAIL until the new validation rules are implemented.
 
-- [ ] **Step 3: Complete the self-check**
+- [x] **Step 3: Complete the self-check**
 
   Validate graph shape, unique nodes, endpoint provenance, required-input labels, non-zero labeled edges, and visualization presence. Print metrics on success and all failures on stderr before returning status 1.
 
-- [ ] **Step 4: Update the README**
+- [x] **Step 4: Update the README**
 
   Add:
 
@@ -417,7 +417,7 @@ and bytecode compilation pass.
   - generalization boundary: relies on JSON Schema-like inputs/outputs and catalog descriptions, never GitHub slugs or relations;
   - visualization opening instructions and its CDN limitation.
 
-- [ ] **Step 5: Run complete verification from a clean generated state**
+- [x] **Step 5: Run complete verification from a clean generated state**
 
   Remove only the two generated outputs, rerun the declared build/run commands from `generator.json`, then run:
 
@@ -431,7 +431,7 @@ and bytecode compilation pass.
 
   Expected: all commands exit 0, provenance is `1.0`, the graph has non-zero labeled edges, and the two README examples have credible incoming dependencies.
 
-- [ ] **Step 6: Review the final diff and commit Phase 5**
+- [x] **Step 6: Review the final diff and commit Phase 5**
 
   Confirm no credentials, caches, temporary files, or catalog-specific hardcoded edges are tracked.
 

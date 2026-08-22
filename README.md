@@ -1,56 +1,98 @@
-# build a tool dependency graph generator (60-120 mins)
+# Tool Dependency Graph Generator
 
-we care about the quality and structure of the dependency relationships you discover
+This project turns a toolkit catalog into a directed graph that helps an agent
+decide whether a required tool input should come from the user or from another
+tool. An edge `producer -> consumer` means the producer can supply the required
+input named by the edge label.
 
-some actions need precursor actions before being able to execute them
+## Run
 
-a concrete example
+Python 3.10+ is the only local dependency. The semantic adjudication endpoint
+is OpenAI-compatible:
 
-1. the tool `GITHUB_CREATE_AN_ISSUE_COMMENT` which needs an `issue_number`
-2. which can be got by `GITHUB_LIST_REPOSITORY_ISSUES` as an example, there could be other ways to get an `issue_number` too
-
-a second more dense exmaple
-the merge tool `GITHUB_MERGE_A_PULL_REQUEST` needs a `pull_number`, if you only have a branch name you first list the pull requests with `GITHUB_LIST_PULL_REQUESTS` to find the matching one and then you can merge it
-
-when we agentically execute actions inside composio, we need to know either what info to get from the user or what other action we should take before we execute the action.
-
-you are supposed to build a program that generates this dependency graph — a generator that reads a toolkit's tool catalog and outputs the graph, instead of hand-writing it
-
-to keep this limited in scope, we give you [Github](https://docs.composio.dev/toolkits/github) as an example toolkit to build and test against — but your generator should generalize: it reads a toolkit's catalog and produces the graph, so it works for any toolkit, not just this one
-
-the final submission should be a visualized dependency graph where i can see connection (this is not super important just should exist for me to see if graph with edges and nodes)
-
-## deliverable
-
-commit a **generator** at the repo root — a program that produces a `dependency_graph.json` from a toolkit's catalog. we run it: your generator is called with the path to a toolkit's catalog as a command-line argument (e.g. `node src/generate.ts path/to/catalog.json`), and it writes `dependency_graph.json` at the repo root (declare build/run in `generator.json`). it must read the catalog it's given, not hardcode a fixed graph. the graph shape our checks read:
-
-```json
-{
-  "nodes": [{ "id": "GITHUB_CREATE_AN_ISSUE", "service": "issues" }],
-  "edges": [{ "from": "GITHUB_LIST_REPOSITORY_ISSUES", "to": "GITHUB_CREATE_AN_ISSUE_COMMENT", "label": "issue_number" }]
-}
+```bash
+export OPENAI_API_KEY="..."
+export OPENAI_BASE_URL="https://your-openai-compatible-endpoint/v1"
+python3 -m compileall -q src
+python3 src/generate.py path/to/catalog.json
+python3 src/selfcheck.py
 ```
 
-- each edge is `producer -> consumer`; `label` is the id/field the producer supplies (e.g. `issue_number`, `pull_number`).
-- use Composio's tool slugs for node ids (e.g. `GITHUB_CREATE_AN_ISSUE`), taken from the catalog you were given.
-- also commit a visualization (nodes + edges you can see) and the tool catalog you use.
+The generator writes `dependency_graph.json` and a visualization at
+`dependency_graph.html`. `generator.json` declares the grader commands. Never
+commit the API key.
 
-## get started
+Open the HTML file directly in a browser. Search focuses matching tool IDs;
+dragging pans and scrolling zooms. Graph data is embedded, so local `file://`
+viewing works. The vis-network renderer uses a CDN and needs network access;
+the page shows a diagnostic if it cannot load.
 
-1. the GitHub tool catalog is already provided at `github_catalog.json` — no api key needed.
-2. write your generator in `src/generate.ts` to read a toolkit's catalog and produce the graph. run `npm run selfcheck` to try it on `github_catalog.json` as you iterate.
-3. use node/tsx or python (`bun` isn't guaranteed when we run your generator).
+## How matching works
 
-for language models, use the **AI API credentials** (a Base URL and API key) shown on your Litmus assessment page. they work with the OpenAI SDK: point the client's `baseURL`/`base_url` at that url and pass the key, and call an allowed model such as `openai/gpt-4o`. your usage counts against the assessment's token budget.
+1. The loader accepts a catalog array or an object containing `tools` or
+   `items`. It extracts IDs from `slug`, `name`, or `function.name`.
+2. JSON Schema-like inputs and outputs are flattened while retaining field
+   path, type, description, and containing entity. `$ref`, arrays, and composed
+   schemas are handled with cycle protection.
+3. Candidate retrieval normalizes snake/camel case, aliases, and simple
+   plurals. Exact matches rank above contextual matches such as output
+   `issues[].number` satisfying required input `issue_number`.
+4. Unambiguous exact matches with entity evidence are accepted
+   deterministically. Remaining shortlists are sent to `openai/gpt-4o` in
+   batches. Model output is restricted to supplied candidates; invented and
+   duplicate rows cannot enter the graph.
+5. Finalization keeps scores at or above `0.75`, validates endpoint provenance
+   and required-input labels, keeps the highest-confidence duplicate, preserves
+   distinct valid producers, and sorts output deterministically.
 
-you can implement this with whatever language you want, feel free to use language models and coding tools
+## Judgment calls
 
-## submit
+- `owner`, `repo`, `org`, `body`, `title`, `name`, `description`, `message`,
+  and `content` are user/context inputs. Connecting them would create dense but
+  operationally meaningless graphs.
+- A producer that itself requires the proposed value is rejected, preventing a
+  circular dependency that does not help obtain the value.
+- Multiple genuine producers are preserved. Same-service context improves
+  ranking but does not erase alternatives.
+- When no producer survives, no edge is forced; the input remains user-supplied
+  or unavailable from the catalog.
+- Descriptions are untrusted prompt data. Responses are structurally validated,
+  and rate-limit/network failures use bounded retries.
 
-once you are done, run `litmus submit` from your assessment folder. make sure your generator (see **deliverable** above) is committed.
+## Audit findings and limitations
 
-## activity tracking
+The GitHub audit found eight candidate producers for each required example:
+`issue_number` into `GITHUB_CREATE_AN_ISSUE_COMMENT`, and `pull_number` into
+`GITHUB_MERGE_A_PULL_REQUEST`. Generic context labels were absent, every node
+came from the catalog, and every edge label was required by its consumer.
 
-your work is tracked automatically while you work (file changes, git history, and AI-tool prompts) and included when you `litmus submit`. there is nothing to run, just commit often.
+The committed graph is a conservative offline identifier snapshot because the
+assessment API sweep was stopped to limit token spend. It contains 893 nodes
+and 2,074 edges. Running the official generator with credentials replaces it
+with the fully LLM-adjudicated graph.
 
-NOTE:  Feel free to use LLM, you will be judged by the quality of output, eval...
+Known false-positive risk: shared identifiers such as `repository_id` can have
+several structurally valid producers although only some are useful in a given
+workflow. Known false-negative risk: missing output schemas or descriptions
+provide too little evidence, so the generator intentionally avoids speculative
+edges. Free-form values are excluded even when a tool technically echoes them.
+
+## Generalization boundary
+
+No GitHub slug or relationship is hardcoded. The implementation relies on
+catalog IDs, descriptions, tags, and JSON Schema-like input/output metadata.
+Catalogs without explicit outputs need richer descriptions or an upstream
+schema-inference step; this generator will not invent undocumented fields.
+
+## Verification
+
+```bash
+python3 -m unittest discover -s tests -v
+python3 -m compileall -q src tests
+python3 src/selfcheck.py
+python3 -m json.tool dependency_graph.json >/dev/null
+```
+
+The self-check validates shape, unique/provenanced nodes, non-empty labeled
+edges, catalog endpoints, required consumer labels, and visualization presence
+without making an API call.

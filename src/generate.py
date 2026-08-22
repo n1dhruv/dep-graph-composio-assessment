@@ -555,6 +555,71 @@ def build_graph(
     return {"nodes": nodes, "edges": edges}
 
 
+def write_visualization(graph: dict[str, Any], path: Path) -> None:
+    embedded = json.dumps(graph, separators=(",", ":")).replace("<", "\\u003c")
+    document = f'''<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Tool dependency graph</title>
+  <script src="https://unpkg.com/vis-network@9.1.9/dist/vis-network.min.js"></script>
+  <style>
+    :root {{ color-scheme: dark; font-family: ui-sans-serif, system-ui, sans-serif; }}
+    * {{ box-sizing: border-box; }}
+    body {{ margin: 0; background: #101418; color: #eef3f7; }}
+    header {{ display: flex; gap: 1rem; align-items: end; justify-content: space-between; padding: 1rem 1.25rem; background: #182028; }}
+    h1 {{ margin: 0 0 .25rem; font-size: clamp(1.25rem, 3vw, 2rem); letter-spacing: -.02em; }}
+    p {{ margin: 0; color: #b8c7d3; }}
+    label {{ display: grid; gap: .35rem; font-weight: 650; }}
+    input {{ width: min(28rem, 48vw); padding: .7rem .85rem; border: 1px solid #536574; border-radius: .75rem; background: #0d1115; color: inherit; font: inherit; }}
+    input:focus-visible {{ outline: 3px solid #4fb3ff; outline-offset: 2px; }}
+    #graph {{ height: calc(100vh - 6rem); min-height: 32rem; }}
+    #status {{ position: fixed; left: 1rem; bottom: 1rem; max-width: min(44rem, calc(100vw - 2rem)); padding: .65rem .8rem; background: #182028; color: #d7e4ed; border-radius: .75rem; box-shadow: 0 8px 24px #0008; }}
+    @media (max-width: 42rem) {{ header {{ align-items: stretch; flex-direction: column; }} input {{ width: 100%; }} #graph {{ height: calc(100vh - 9rem); }} }}
+  </style>
+</head>
+<body>
+  <!-- Static graph explorer: embedded data, directed labeled edges, search and zoom/pan. -->
+  <header>
+    <div><h1>Tool dependency graph</h1><p id="summary"></p></div>
+    <label for="search">Find a tool<input id="search" type="search" placeholder="GITHUB_CREATE_AN_ISSUE_COMMENT" autocomplete="off"></label>
+  </header>
+  <main id="graph" aria-label="Interactive dependency graph"></main>
+  <output id="status" aria-live="polite">Loading graph…</output>
+  <script id="graph-data" type="application/json">{embedded}</script>
+  <script>
+    const graph = JSON.parse(document.getElementById('graph-data').textContent);
+    const status = document.getElementById('status');
+    document.getElementById('summary').textContent = `${{graph.nodes.length.toLocaleString()}} tools · ${{graph.edges.length.toLocaleString()}} dependencies`;
+    if (!window.vis) {{ status.textContent = 'Graph renderer could not load. Check your connection to unpkg.com.'; }}
+    else {{
+      const nodes = new vis.DataSet(graph.nodes.map(node => ({{...node, label: node.id, title: node.service || 'Uncategorized'}})));
+      const edges = new vis.DataSet(graph.edges.map((edge, id) => ({{id, from: edge.from, to: edge.to, label: edge.label, arrows: 'to'}})));
+      const network = new vis.Network(document.getElementById('graph'), {{nodes, edges}}, {{
+        nodes: {{shape: 'dot', size: 9, color: {{background: '#4fb3ff', border: '#a7dcff'}}, font: {{color: '#eef3f7', size: 11}}}},
+        edges: {{color: {{color: '#536574', highlight: '#ffca5c'}}, font: {{color: '#d7e4ed', strokeWidth: 4, strokeColor: '#101418', size: 10}}, smooth: false}},
+        interaction: {{hover: true, navigationButtons: true}},
+        physics: {{stabilization: {{iterations: 300}}, barnesHut: {{gravitationalConstant: -12000, springLength: 125}}}}
+      }});
+      network.once('stabilizationIterationsDone', () => {{ status.textContent = 'Ready — scroll to zoom, drag to pan, or search by tool ID.'; network.setOptions({{physics: false}}); }});
+      document.getElementById('search').addEventListener('input', event => {{
+        const query = event.target.value.trim().toUpperCase();
+        const match = graph.nodes.find(node => node.id.toUpperCase().includes(query));
+        if (!query) {{ status.textContent = 'Ready — scroll to zoom, drag to pan, or search by tool ID.'; return; }}
+        if (!match) {{ status.textContent = `No tool matches “${{event.target.value}}”.`; return; }}
+        network.selectNodes([match.id]); network.focus(match.id, {{scale: 1.5, animation: true}}); status.textContent = match.id;
+      }});
+    }}
+  </script>
+</body>
+</html>
+'''
+    temporary = path.with_suffix(f"{path.suffix}.tmp")
+    temporary.write_text(document, encoding="utf-8")
+    temporary.replace(path)
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = list(sys.argv if argv is None else argv)
     if len(args) < 2:
@@ -636,6 +701,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     temporary = output.with_suffix(f"{output.suffix}.tmp")
     temporary.write_text(json.dumps(graph, indent=2) + "\n", encoding="utf-8")
     temporary.replace(output)
+    write_visualization(graph, Path("dependency_graph.html"))
     print(
         f"wrote {len(graph['nodes'])} nodes, {len(graph['edges'])} edges to {output}",
         file=sys.stderr,
