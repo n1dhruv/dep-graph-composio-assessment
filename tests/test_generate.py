@@ -544,6 +544,7 @@ class LlmTests(unittest.TestCase):
         self.assertLessEqual(len(first_question["candidates"][0]["producer"]["description"]), 500)
         self.assertLessEqual(len(first_question["candidates"][0]["output"]["description"]), 500)
         self.assertIn("untrusted", payloads[0]["messages"][0]["content"].lower())
+        self.assertNotIn('"confidence":0.0', payloads[0]["messages"][0]["content"])
 
     def test_unique_exact_contextual_match_bypasses_llm(self):
         output = field("comment_id", path="data.comment.comment_id", entity="Comment")

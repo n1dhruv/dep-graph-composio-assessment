@@ -193,7 +193,7 @@
 
 ---
 
-## Phase 2B: Batched LLM semantic adjudication — implementation complete; live smoke pending
+## Phase 2B: Batched LLM semantic adjudication — complete
 
 **Files:**
 
@@ -237,7 +237,7 @@
 
   Accept a deterministic edge without an API call only when the field names canonicalize exactly, the name is not generic, the output path/entity agrees with the input entity, and there is exactly one credible producer. Send all other non-empty shortlists to the model.
 
-- [ ] **Step 6: Run offline tests, then one bounded live smoke check**
+- [x] **Step 6: Run offline tests, then one bounded live smoke check**
 
   Run:
 
@@ -255,7 +255,7 @@
   git commit -m "feat: LLM-assisted semantic matching"
   ```
 
-**Recorded outcome:** Offline validation covers batching, prompt-injection boundaries, malformed responses, hallucinated/non-candidate edges, duplicates, confidence bounds, retries, missing credentials, and conservative deterministic bypass. A no-credit GitHub dry run produced 39 batches for 777 questions; the largest request payload was 96,774 bytes. The real catalog had no edge safe enough for deterministic bypass, avoiding the false confidence found during review. Step 6's live smoke remains unchecked because `OPENAI_API_KEY` and `OPENAI_BASE_URL` were absent from the execution environment.
+**Recorded outcome:** Offline validation covers batching, prompt-injection boundaries, malformed responses, hallucinated/non-candidate edges, duplicates, confidence bounds, retries, missing credentials, and conservative deterministic bypass. A no-credit GitHub dry run produced 39 batches for 777 questions; the largest request payload was 96,774 bytes. The real catalog had no edge safe enough for deterministic bypass, avoiding false confidence. The bounded live smoke returned validated `issue_number` edges at `0.95`, including `GITHUB_LIST_REPOSITORY_ISSUES -> GITHUB_CREATE_AN_ISSUE_COMMENT`; the API key was passed through hidden stdin and was not written to the repository.
 
 ---
 
